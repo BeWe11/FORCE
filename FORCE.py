@@ -2,7 +2,7 @@
 
 import numpy as np
 import theano
-theano.config.profile = True
+#  theano.config.profile = True
 theano.config.floatX = 'float32'
 #  theano.config.allow_gc = False # Disable garbace collection to buffer intermediate results
 import theano.tensor as T
@@ -222,7 +222,11 @@ class ForceNetwork:
 
         state_updates = [(self.x, self.x + dx), (self.y, self.y + dy)]
 
-        #####TODO: Get rid of sum() hack!!!
+        #TODO: Theano shared objects are not broadcastable by default, and setting
+        # the relevant axes broadcastable doesnt seem to work. To circumvent this, I
+        # sum theses axes (luckyly, they all have size 1, so the sum doesnt change anything).
+        # This guarantees that the axes dimensions will always be 1, making them broadcastable.
+        # A less 'hacky' solution is desirable
 
         # Update prediciton of correlation
         dP = T.dot(T.dot(self.P, r), T.dot(r.T, self.P)) * T.inv(1 + T.dot(T.dot(r.T, self.P), r).sum())
@@ -259,6 +263,72 @@ class ForceNetwork:
     def learning_step(self, input, f):
         self.update_state(input)
         return self.update_weights(f)
+
+    def train(self, inputs, teacher_outputs, show_progress=True, const_input=False):
+        weight_changes = []
+        output = []
+
+        if const_input:
+            inputs = [inputs] * len(teacher_outputs)
+
+        # Make inputs and outputs numpy arrays in case they are not already
+        inputs = [np.array(val, dtype=theano.config.floatX) for val in inputs]
+        teacher_outputs = [np.array(val, dtype=theano.config.floatX) for val in teacher_outputs]
+
+        # Convert to column vectors (nx1 matrices)
+        if inputs[0].size == 1:
+            inputs = [val.reshape(1, 1) for val in inputs]
+        else:
+            inputs = [val.reshape(val.shape[0], 1) for val in inputs]
+        if teacher_outputs[0].size == 1:
+            teacher_outputs = [val.reshape(1, 1) for val in teacher_outputs]
+        else:
+            teacher_outputs = [val.reshape(val.shape[0], 1) for val in teacher_outputs]
+
+        if show_progress:
+            bar = ProgressBar(max_value=len(teacher_outputs))
+            for input, f in bar(zip(inputs, teacher_outputs)):
+                dw = self.learning_step(input, f)
+                weight_changes.append(dw)
+                output.append(self.output())
+        else:
+            for input, f in zip(inputs, teacher_outputs):
+                dw = self.learning_step(input, f)
+                weight_changes.append(dw)
+                output.append(self.output())
+
+        return output, weight_changes
+
+    def activity(self, inputs, repeat=1, show_progress=True):
+        weight_changes = []
+        output = []
+
+        if np.isscalar(inputs):
+            # Set all input activities to 'inputs' if 'inputs' is a scalar value
+            inputs = [np.ones((self.dimensions["I"], 1), dtype=theano.config.floatX) * inputs]
+        else:
+            # Make 'inputs' a numpy array in case it is not already
+            inputs = [np.array(val, dtype=theano.config.floatX) for val in inputs]
+
+            # Convert to column vectors (nx1 matrix)
+            if inputs[0].size == 1:
+                inputs = [val.reshape(1, 1) for val in inputs]
+            else:
+                inputs = [val.reshape(val.shape[0], 1) for val in inputs]
+
+        if show_progress:
+            bar = ProgressBar(max_value=len(inputs)*repeat)
+            for input in bar(inputs*repeat):
+                weight_changes.append(0)
+                self.update_state(input)
+                output.append(self.output())
+        else:
+            for input in inputs*repeat:
+                weight_changes.append(0)
+                self.update_state(input)
+                output.append(self.output())
+
+        return output, weight_changes
 
     def save(self, filename):
         with open(filename, 'wb') as file:
@@ -312,8 +382,8 @@ def get_angles2d(x, y):
 
 
 def main():
-    # Network setup
-    dimensions = {"I": 1, "G": 4000, "z": 2, "F": 1}
+    ### NETWORK SETUP ###
+    dimensions = {"I": 1, "G": 1000, "z": 1, "F": 1}
     weight_scales = {"GG": 1.5, "zG": 1.0, "Gz": 1.0, "GF": 0, "FF": 0, "FG": 0}
     densities = {"GG": 0.1, "zG": 1.0, "GF": 1.0, "FF": 1.0, "FG": 1.0}
     dt = 10e-3 # milliseconds
@@ -321,49 +391,51 @@ def main():
     alpha = 1.0
     network = ForceNetwork(dimensions, weight_scales, densities, dt, tau, alpha)
 
-    # Idle network activity before training
+    ### IDLE NETWORK ACTIVITY BEFORE TRAINING ###
     output = []
     sample_activities = [[] for _ in range(10)]
     weight_changes = []
+    n_samples = 1000
 
     print("\n--- Idle network activity before training ---")
-    bar = ProgressBar(max_value=1000)
-    for _ in bar(range(1000)):
-        weight_changes.append(0)
-        network.update_state(np.array([[0]], dtype=theano.config.floatX))
-        output.append(network.output())
-        #  for i in range(10):
-            #  sample_activities[i].append(network.x[i,0])
+    o, w = network.activity(0, repeat=n_samples)
+    weight_changes += w
+    output += o
 
-    # Training
+    #  inputs = [
+        #  np.array([1, 0, 0], dtype=theano.config.floatX),
+        #  np.array([0, 1, 0], dtype=theano.config.floatX),
+        #  np.array([0, 0, 1], dtype=theano.config.floatX),
+    #  ]
+
+    ### TRAINING ###
     period = 0.1
-    #  functions = [np.sin, signal.sawtooth, lambda x: np.sin(2*x) + 3 * np.cos(np.sin(x**2))*np.tanh(x)]
-    functions = [np.sin]
+    #  functions = [np.sin, lambda x: np.cos(x) * np.cos(x), lambda x: np.sin(x) + 3 * np.cos(np.sin(x))*np.tanh(x)]
+    functions = [np.sin, lambda x: np.cos(x) * np.cos(x), lambda x: np.cos(x) + np.sin(x)]
+    #  inputs = [np.array([val], dtype=theano.config.floatX) for val in np.random.uniform(-1, 1, len(functions))]
     inputs = np.random.uniform(-1, 1, len(functions))
 
     print("\n--- Training ---")
-    for function in functions:
-        x = np.linspace(0, 1, 1000)
-        #  y = function((2 * np.pi / period) * x)
-        #  x = [np.array([[val]]) for val in x]
-        #  y = [np.array([[val]]) for val in y]
-        y1 = np.sin((2 * np.pi / period) * x)
-        y2 = np.cos((2 * np.pi / period) * x)
-        x = [np.array([[val]], dtype=theano.config.floatX) for val in x]
-        y = [np.array([[val1], [val2]], dtype=theano.config.floatX) for (val1, val2) in zip(y1, y2)]
+    for k, function in enumerate(functions):
+        #  x = np.linspace(0, 1, 1000)
+        #  #  y = function((2 * np.pi / period) * x)
+        #  #  x = [np.array([[val]]) for val in x]
+        #  #  y = [np.array([[val]]) for val in y]
+        #  y1 = np.sin((2 * np.pi / period) * x)
+        #  y2 = np.cos((2 * np.pi / period) * x)
+        #  x = [np.array([[val]], dtype=theano.config.floatX) for val in x]
+        #  y = [np.array([[val1], [val2]], dtype=theano.config.floatX) for (val1, val2) in zip(y1, y2)]
 
-        bar = ProgressBar(max_value=len(x))
-        for input, f in bar(zip(x, y)):
-            dw = network.learning_step(np.array([[inputs[0]]], dtype=theano.config.floatX), f)
-            weight_changes.append(dw)
-            output.append(network.output())
-            #  for i in range(10):
-                #  sample_activities[i].append(network.x[i,0])
+        x = np.linspace(0, 1, n_samples)
+        y = function((2 * np.pi / period) * x)
 
-        for _ in range(100):
-            weight_changes.append(0)
-            network.update_state(np.array([[0]], dtype=theano.config.floatX))
-            output.append(network.output())
+        o, w = network.train(inputs[k], y, const_input=True)
+        weight_changes += w
+        output += o
+
+        o, w = network.activity(0, repeat=100)
+        weight_changes += w
+        output += o
             #  for i in range(10):
                 #  sample_activities[i].append(network.x[i,0])
 
@@ -371,40 +443,27 @@ def main():
     #  network.load('testsave')
 
 
-    # Idle network activity after training
+    ### IDLE NETWORK ACTIVITY AFTER TRAINING ###
     print("\n--- Idle network activity after training ---")
-    bar = ProgressBar(max_value=1000)
-    for _ in bar(range(1000)):
-        weight_changes.append(0)
-        network.update_state(np.array([[0]], dtype=theano.config.floatX))
-        output.append(network.output())
-        #  for i in range(10):
-            #  sample_activities[i].append(network.x[i,0])
+    o, w = network.activity(0, repeat=n_samples)
+    weight_changes += w
+    output += o
 
     for j in range(len(functions)):
         print("\n--- Testing ---")
-        bar = ProgressBar(max_value=1000)
-        for _ in bar(range(1000)):
-            weight_changes.append(0)
-            network.update_state(np.array([[inputs[j]]], dtype=theano.config.floatX))
-            output.append(network.output())
-            #  for i in range(10):
-                #  sample_activities[i].append(network.x[i,0])
+        o, w = network.activity(inputs[j], repeat=n_samples)
+        weight_changes += w
+        output += o
 
         print("\n--- Idle network ---")
-        bar = ProgressBar(max_value=1000)
-        for _ in bar(range(1000)):
-            weight_changes.append(0)
-            network.update_state(np.array([[0]], dtype=theano.config.floatX))
-            output.append(network.output())
-            #  for i in range(10):
-                #  sample_activities[i].append(network.x[i,0])
+        o, w = network.activity(0, repeat=n_samples)
+        weight_changes += w
+        output += o
 
-
-    # Plotting
+    ### PLOTTING ###
     fig, axes = plt.subplots(6)
     axes[0].plot([val[0,0] for val in output], c='r')
-    axes[0].plot([val[1,0] for val in output], c='g')
+    #  axes[0].plot([val[1,0] for val in output], c='g')
     #  for i in range(4):
         #  axes[i+1].plot(sample_activities[i], c='b')
     axes[5].plot(weight_changes)

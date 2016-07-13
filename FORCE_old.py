@@ -242,7 +242,7 @@ def get_angles2d(x, y):
 
 if __name__ == "__main__":
     # Network setup
-    dimensions = {"I": 1, "G": 300, "z": 2, "F": 1}
+    dimensions = {"I": 1, "G": 1000, "z": 1, "F": 1}
     weight_scales = {"GG": 1.5, "zG": 1.0, "Gz": 1.0, "GF": 0, "FF": 0, "FG": 0}
     densities = {"GG": 0.1, "zG": 1.0, "GF": 1.0, "FF": 1.0, "FG": 1.0}
     tau = 10e-3 # milliseconds
@@ -266,19 +266,25 @@ if __name__ == "__main__":
     # Training
     period = 0.1
     #  functions = [np.sin, signal.sawtooth, lambda x: np.sin(2*x) + 3 * np.cos(np.sin(x**2))*np.tanh(x)]
-    functions = [np.sin]
+    functions = [np.sin, lambda x: np.cos(x) * np.cos(x), lambda x: np.sin(x) + 3 * np.cos(np.sin(x))*np.tanh(x)]
+    #  functions = [np.sin]
     inputs = np.random.uniform(-1, 1, len(functions))
 
     print("\n--- Training ---")
     for function in functions:
-        x = np.linspace(0, 1, 1000)
-        #  y = function((2 * np.pi / period) * x)
+        #  x = np.linspace(0, 1, 1000)
+        #  #  y = function((2 * np.pi / period) * x)
+        #  #  x = [np.array([[val]]) for val in x]
+        #  #  y = [np.array([[val]]) for val in y]
+        #  y1 = np.sin((2 * np.pi / period) * x)
+        #  y2 = np.cos((2 * np.pi / period) * x)
         #  x = [np.array([[val]]) for val in x]
-        #  y = [np.array([[val]]) for val in y]
-        y1 = np.sin((2 * np.pi / period) * x)
-        y2 = np.cos((2 * np.pi / period) * x)
+        #  y = [np.array([[val1], [val2]]) for (val1, val2) in zip(y1, y2)]
+
+        x = np.linspace(0, 1, 1000)
+        y = function((2 * np.pi / period) * x)
         x = [np.array([[val]]) for val in x]
-        y = [np.array([[val1], [val2]]) for (val1, val2) in zip(y1, y2)]
+        y = [np.array([[val]]) for val in y]
 
         bar = ProgressBar(max_value=len(x))
         for input, f in bar(zip(x, y)):
@@ -335,7 +341,7 @@ if __name__ == "__main__":
     # Plotting
     fig, axes = plt.subplots(6)
     axes[0].plot([val[0,0] for val in output], c='r')
-    axes[0].plot([val[1,0] for val in output], c='g')
+    #  axes[0].plot([val[1,0] for val in output], c='g')
     for i in range(4):
         axes[i+1].plot(sample_activities[i], c='b')
     axes[5].plot(weight_changes)
